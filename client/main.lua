@@ -14,6 +14,7 @@ local originalHeading = nil
 local capturedEmote = nil
 local originalAlpha = 255
 local lastSync = 0
+local lastSentX, lastSentY, lastSentZ, lastSentH
 local remoteEdits = {}
 
 local controls = {
@@ -85,7 +86,15 @@ local function drawHelpText()
     EndTextCommandDisplayText(Config.HelpPosition.x, Config.HelpPosition.y)
 end
 
-local function getStep()
+-- 60 fps keeps today's step size. A hitch cannot take a step larger than 50 ms.
+local function frameScale()
+    local frame = GetFrameTime()
+    if type(frame) ~= 'number' or frame ~= frame or frame <= 0.0 then return 1.0 end
+    if frame > 0.05 then frame = 0.05 end
+    return frame * 60.0
+end
+
+local function getStep(scale)
     local step = Config.MoveStep
 
     if IsDisabledControlPressed(0, controls.shift) then
@@ -94,7 +103,7 @@ local function getStep()
         step = step * Config.SlowMultiplier
     end
 
-    return step
+    return step * scale
 end
 
 local function withinLimit(origin, dest)
@@ -106,15 +115,32 @@ local function withinLimit(origin, dest)
     return true
 end
 
-local function pathBlocked(from, to, ped)
+local function hasMoved(x1, y1, z1, x2, y2, z2)
+    local dx = x2 - x1
+    local dy = y2 - y1
+    local dz = z2 - z1
+    return (dx * dx + dy * dy + dz * dz) > 1.0e-8
+end
+
+local function pathBlocked(x1, y1, z1, x2, y2, z2, ped)
     if not Config.CollisionCheck then return false end
     local handle = StartExpensiveSynchronousShapeTestLosProbe(
-        from.x, from.y, from.z + 0.4,
-        to.x, to.y, to.z + 0.4,
+        x1, y1, z1 + 0.4,
+        x2, y2, z2 + 0.4,
         17, ped, 7
     )
     local _, hit = GetShapeTestResult(handle)
     return hit == 1
+end
+
+local function poseChanged(x, y, z, h)
+    if lastSentX == nil then return true end
+    if math.abs(x - lastSentX) > 0.0005 or math.abs(y - lastSentY) > 0.0005 or math.abs(z - lastSentZ) > 0.0005 then
+        return true
+    end
+    local dh = math.abs(h - lastSentH) % 360.0
+    if dh > 180.0 then dh = 360.0 - dh end
+    return dh > 0.05
 end
 
 local function getForwardRight(heading)
@@ -180,6 +206,7 @@ local function stopEditing(save)
     originalCoords = nil
     originalHeading = nil
     originalAlpha = nil
+    lastSentX = nil
 
     replayCapturedEmote()
     capturedEmote = nil
@@ -201,6 +228,7 @@ local function startEditing()
     end
 
     editing = true
+    lastSentX = nil
     originalCoords = GetEntityCoords(ped)
     originalHeading = GetEntityHeading(ped)
     originalAlpha = GetEntityAlpha(ped)
@@ -247,10 +275,12 @@ CreateThread(function()
 
             local ped = PlayerPedId()
             local coords = GetEntityCoords(ped)
+            local fromX, fromY, fromZ = coords.x, coords.y, coords.z
             local heading = GetEntityHeading(ped)
-            local step = getStep()
-            local heightStep = Config.HeightStep
-            local rotateStep = Config.RotateStep
+            local scale = frameScale()
+            local step = getStep(scale)
+            local heightStep = Config.HeightStep * scale
+            local rotateStep = Config.RotateStep * scale
             local forward, right = getForwardRight(heading)
             local moved = false
 
@@ -299,16 +329,22 @@ CreateThread(function()
             end
 
             if moved then
-                local positionOk = withinLimit(originalCoords, coords) and not pathBlocked(GetEntityCoords(ped), coords, ped)
-                if positionOk then
+                local positionChanged = hasMoved(fromX, fromY, fromZ, coords.x, coords.y, coords.z)
+                local positionOk = withinLimit(originalCoords, coords)
+                if positionOk and positionChanged then
+                    positionOk = not pathBlocked(fromX, fromY, fromZ, coords.x, coords.y, coords.z, ped)
+                end
+                if positionOk and positionChanged then
                     SetEntityCoordsNoOffset(ped, coords.x, coords.y, coords.z, false, false, false)
                 end
                 SetEntityHeading(ped, heading % 360.0)
                 coords = GetEntityCoords(ped)
 
-                if Config.NetworkSync and (GetGameTimer() - lastSync) >= Config.SyncInterval then
+                local sentHeading = heading % 360.0
+                if Config.NetworkSync and poseChanged(coords.x, coords.y, coords.z, sentHeading) and (GetGameTimer() - lastSync) >= Config.SyncInterval then
                     lastSync = GetGameTimer()
-                    TriggerServerEvent('nova-animpos:server:sync', coords.x, coords.y, coords.z, heading % 360.0)
+                    lastSentX, lastSentY, lastSentZ, lastSentH = coords.x, coords.y, coords.z, sentHeading
+                    TriggerServerEvent('nova-animpos:server:sync', coords.x, coords.y, coords.z, sentHeading)
                 end
             end
 
@@ -335,12 +371,13 @@ end)
 
 CreateThread(function()
     while true do
-        local active = next(remoteEdits) ~= nil
+        local active = false
 
         for serverId, t in pairs(remoteEdits) do
             if GetGameTimer() > t.expires then
                 remoteEdits[serverId] = nil
             else
+                active = true
                 local pid = GetPlayerFromServerId(serverId)
                 if pid ~= -1 then
                     local ped = GetPlayerPed(pid)
