@@ -144,7 +144,7 @@ local function commitMove(mult)
     local step = getStep() * mult
     local heightStep = Config.HeightStep * mult
     local rotateStep = Config.RotateStep * mult
-    local forward, right = getForwardRight(heading)
+    local forward, right = getForwardRight(GetGameplayCamRot(2).z)
     local positionChanged = false
 
     if heldForward ~= 0.0 then
@@ -162,15 +162,16 @@ local function commitMove(mult)
         positionChanged = true
     end
 
-    if heldTurn ~= 0.0 then
-        heading = heading + (rotateStep * heldTurn)
-    end
-
+    local moved = false
     if positionChanged and withinLimit(originalCoords, coords) and not pathBlocked(vector3(fromX, fromY, fromZ), coords, ped) then
         SetEntityCoordsNoOffset(ped, coords.x, coords.y, coords.z, false, false, false)
+        moved = true
     end
 
     if heldTurn ~= 0.0 then
+        heading = heading + (rotateStep * heldTurn)
+        SetEntityHeading(ped, heading % 360.0)
+    elseif moved then
         SetEntityHeading(ped, heading % 360.0)
     end
 
