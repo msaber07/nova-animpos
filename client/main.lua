@@ -14,6 +14,8 @@ local originalHeading = nil
 local capturedEmote = nil
 local originalAlpha = 255
 local lastSync = 0
+local pendingMoves = 0
+local heldForward, heldRight, heldUp, heldTurn = 0.0, 0.0, 0.0, 0.0
 local remoteEdits = {}
 
 local controls = {
@@ -133,6 +135,52 @@ local function getForwardRight(heading)
     return forward, right
 end
 
+-- Two frames share one placement and one wall check. The step is doubled, so the speed stays the same.
+local function commitMove(mult)
+    local ped = PlayerPedId()
+    local coords = GetEntityCoords(ped)
+    local fromX, fromY, fromZ = coords.x, coords.y, coords.z
+    local heading = GetEntityHeading(ped)
+    local step = getStep() * mult
+    local heightStep = Config.HeightStep * mult
+    local rotateStep = Config.RotateStep * mult
+    local forward, right = getForwardRight(heading)
+    local positionChanged = false
+
+    if heldForward ~= 0.0 then
+        coords = coords + (forward * (step * heldForward))
+        positionChanged = true
+    end
+
+    if heldRight ~= 0.0 then
+        coords = coords + (right * (step * heldRight))
+        positionChanged = true
+    end
+
+    if heldUp ~= 0.0 then
+        coords = coords + vector3(0.0, 0.0, heightStep * heldUp)
+        positionChanged = true
+    end
+
+    if heldTurn ~= 0.0 then
+        heading = heading + (rotateStep * heldTurn)
+    end
+
+    if positionChanged and withinLimit(originalCoords, coords) and not pathBlocked(vector3(fromX, fromY, fromZ), coords, ped) then
+        SetEntityCoordsNoOffset(ped, coords.x, coords.y, coords.z, false, false, false)
+    end
+
+    if heldTurn ~= 0.0 then
+        SetEntityHeading(ped, heading % 360.0)
+    end
+
+    if (positionChanged or heldTurn ~= 0.0) and Config.NetworkSync and (GetGameTimer() - lastSync) >= Config.SyncInterval then
+        lastSync = GetGameTimer()
+        local sent = GetEntityCoords(ped)
+        TriggerServerEvent('nova-animpos:server:sync', sent.x, sent.y, sent.z, heading % 360.0)
+    end
+end
+
 local function getCurrentRpEmote()
     if not Config.ReplayRpEmote or GetResourceState('rpemotes') ~= 'started' then
         return nil
@@ -185,6 +233,7 @@ local function stopEditing(save)
     restoreAlpha(ped)
 
     editing = false
+    pendingMoves = 0
     originalCoords = nil
     originalHeading = nil
     originalAlpha = nil
@@ -253,18 +302,10 @@ CreateThread(function()
         else
             Wait(0)
 
-            local ped = PlayerPedId()
-
             for _, control in ipairs(disabledControls) do
                 DisableControlAction(0, control, true)
             end
 
-            local coords = GetEntityCoords(ped)
-            local heading = GetEntityHeading(ped)
-            local step = getStep()
-            local heightStep = Config.HeightStep
-            local rotateStep = Config.RotateStep
-            local forward, right = getForwardRight(heading)
             local rightAmount = stickAxis(GetDisabledControlNormal(0, 30))
             local forwardAmount = stickAxis(-GetDisabledControlNormal(0, 31))
             if forwardAmount == 0.0 and rightAmount == 0.0 then
@@ -273,50 +314,23 @@ CreateThread(function()
                 if IsDisabledControlPressed(0, controls.d) then rightAmount = 1.0 end
                 if IsDisabledControlPressed(0, controls.a) then rightAmount = rightAmount - 1.0 end
             end
-            local moved = false
+            local upAmount = 0.0
+            if IsDisabledControlPressed(0, controls.pageUp) then upAmount = 1.0 end
+            if IsDisabledControlPressed(0, controls.pageDown) then upAmount = upAmount - 1.0 end
+            local turnAmount = 0.0
+            if IsDisabledControlPressed(0, controls.q) then turnAmount = 1.0 end
+            if IsDisabledControlPressed(0, controls.e) then turnAmount = turnAmount - 1.0 end
 
-            if forwardAmount ~= 0.0 then
-                coords = coords + (forward * (step * forwardAmount))
-                moved = true
-            end
-
-            if rightAmount ~= 0.0 then
-                coords = coords + (right * (step * rightAmount))
-                moved = true
-            end
-
-            if IsDisabledControlPressed(0, controls.pageUp) then
-                coords = coords + vector3(0.0, 0.0, heightStep)
-                moved = true
-            end
-
-            if IsDisabledControlPressed(0, controls.pageDown) then
-                coords = coords - vector3(0.0, 0.0, heightStep)
-                moved = true
-            end
-
-            if IsDisabledControlPressed(0, controls.q) then
-                heading = heading + rotateStep
-                moved = true
-            end
-
-            if IsDisabledControlPressed(0, controls.e) then
-                heading = heading - rotateStep
-                moved = true
-            end
-
-            if moved then
-                local positionOk = withinLimit(originalCoords, coords) and not pathBlocked(GetEntityCoords(ped), coords, ped)
-                if positionOk then
-                    SetEntityCoordsNoOffset(ped, coords.x, coords.y, coords.z, false, false, false)
+            if forwardAmount ~= 0.0 or rightAmount ~= 0.0 or upAmount ~= 0.0 or turnAmount ~= 0.0 then
+                heldForward, heldRight, heldUp, heldTurn = forwardAmount, rightAmount, upAmount, turnAmount
+                pendingMoves = pendingMoves + 1
+                if pendingMoves >= 2 then
+                    commitMove(2)
+                    pendingMoves = 0
                 end
-                SetEntityHeading(ped, heading % 360.0)
-                coords = GetEntityCoords(ped)
-
-                if Config.NetworkSync and (GetGameTimer() - lastSync) >= Config.SyncInterval then
-                    lastSync = GetGameTimer()
-                    TriggerServerEvent('nova-animpos:server:sync', coords.x, coords.y, coords.z, heading % 360.0)
-                end
+            elseif pendingMoves > 0 then
+                commitMove(pendingMoves)
+                pendingMoves = 0
             end
 
             if IsDisabledControlJustPressed(0, controls.enter) then
