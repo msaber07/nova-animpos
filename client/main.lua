@@ -11,6 +11,7 @@ local L = Config.Locales[Config.Locale] or Config.Locales.en
 local editing = false
 local originalCoords = nil
 local originalHeading = nil
+local editHeading = 0.0
 local capturedEmote = nil
 local originalAlpha = 255
 local lastSync = 0
@@ -140,7 +141,6 @@ local function commitMove(mult)
     local ped = PlayerPedId()
     local coords = GetEntityCoords(ped)
     local fromX, fromY, fromZ = coords.x, coords.y, coords.z
-    local heading = GetEntityHeading(ped)
     local step = getStep() * mult
     local heightStep = Config.HeightStep * mult
     local rotateStep = Config.RotateStep * mult
@@ -162,23 +162,19 @@ local function commitMove(mult)
         positionChanged = true
     end
 
-    local moved = false
-    if positionChanged and withinLimit(originalCoords, coords) and not pathBlocked(vector3(fromX, fromY, fromZ), coords, ped) then
-        SetEntityCoordsNoOffset(ped, coords.x, coords.y, coords.z, false, false, false)
-        moved = true
+    if heldTurn ~= 0.0 then
+        editHeading = (editHeading + (rotateStep * heldTurn)) % 360.0
     end
 
-    if heldTurn ~= 0.0 then
-        heading = heading + (rotateStep * heldTurn)
-        SetEntityHeading(ped, heading % 360.0)
-    elseif moved then
-        SetEntityHeading(ped, heading % 360.0)
+    if positionChanged and withinLimit(originalCoords, coords) and not pathBlocked(vector3(fromX, fromY, fromZ), coords, ped) then
+        -- Warp keeps the sit pose. A normal move turns the ped toward the step.
+        SetEntityCoordsNoOffset(ped, coords.x, coords.y, coords.z, true, true, true)
     end
 
     if (positionChanged or heldTurn ~= 0.0) and Config.NetworkSync and (GetGameTimer() - lastSync) >= Config.SyncInterval then
         lastSync = GetGameTimer()
         local sent = GetEntityCoords(ped)
-        TriggerServerEvent('nova-animpos:server:sync', sent.x, sent.y, sent.z, heading % 360.0)
+        TriggerServerEvent('nova-animpos:server:sync', sent.x, sent.y, sent.z, editHeading)
     end
 end
 
@@ -227,9 +223,7 @@ local function stopEditing(save)
         SetEntityHeading(ped, originalHeading)
     end
 
-    if Config.FreezeWhileEditing then
-        FreezeEntityPosition(ped, false)
-    end
+    FreezeEntityPosition(ped, false)
 
     restoreAlpha(ped)
 
@@ -261,12 +255,12 @@ local function startEditing()
     editing = true
     originalCoords = GetEntityCoords(ped)
     originalHeading = GetEntityHeading(ped)
+    editHeading = originalHeading
     originalAlpha = GetEntityAlpha(ped)
     capturedEmote = getCurrentRpEmote()
 
-    if Config.FreezeWhileEditing then
-        FreezeEntityPosition(ped, true)
-    end
+    -- Root motion turns the body toward each step. Freeze keeps the facing still.
+    FreezeEntityPosition(ped, true)
 
     SetEntityAlpha(ped, Config.EditAlpha, false)
 
@@ -340,6 +334,12 @@ CreateThread(function()
                 stopEditing(false)
             end
 
+            if editing then
+                local ped = PlayerPedId()
+                SetEntityHeading(ped, editHeading)
+                SetEntityAngularVelocity(ped, 0.0, 0.0, 0.0)
+            end
+
             drawHelpText()
         end
     end
@@ -368,7 +368,7 @@ CreateThread(function()
                 if pid ~= -1 then
                     local ped = GetPlayerPed(pid)
                     if ped and ped ~= 0 and DoesEntityExist(ped) then
-                        SetEntityCoordsNoOffset(ped, t.x, t.y, t.z, false, false, false)
+                        SetEntityCoordsNoOffset(ped, t.x, t.y, t.z, true, true, true)
                         SetEntityHeading(ped, t.h)
                     end
                 end
@@ -383,9 +383,7 @@ AddEventHandler('onResourceStop', function(resourceName)
     if resourceName ~= GetCurrentResourceName() or not editing then return end
 
     local ped = PlayerPedId()
-    if Config.FreezeWhileEditing then
-        FreezeEntityPosition(ped, false)
-    end
+    FreezeEntityPosition(ped, false)
 
     restoreAlpha(ped)
 end)
