@@ -21,8 +21,8 @@ Config.FreezeWhileEditing = false
 Config.ReplayRpEmote = true        -- rpemotes kuruluysa, pozisyon bitince emote'u tekrar oynat
 Config.EditAlpha = 150 -- character translucent in edit mode
 
--- Mirror the location LIVE to other players while editing.
--- (If off, the movement is synchronized only at the end â†’ “Teleport” appears on the opposite side.)
+-- Mirror the location live to other players while editing.
+-- If this is off, other players see the move only when editing ends.
 Config.NetworkSync = true
 Config.SyncInterval = 90 -- ms (low = smoother, slightly more network traffic)
 

@@ -5,7 +5,7 @@ lua54 'yes'
 name 'nova-animpos'
 author 'Nova'
 description 'Standalone animation position adjuster (/ap) for seated/animation alignment'
-version '1.0.0'
+version '1.1.0'
 
 shared_scripts {
     'shared/config.lua',
