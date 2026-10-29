@@ -9,7 +9,6 @@ Config.Notify = 'qb'
 
 Config.Command = 'ap'
 
--- Steps are the per-frame amount at 60 fps. Frame time scales them after that.
 Config.MoveStep = 0.025
 Config.FastMultiplier = 4.0
 Config.SlowMultiplier = 0.35

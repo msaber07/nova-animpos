@@ -14,12 +14,6 @@ local originalHeading = nil
 local capturedEmote = nil
 local originalAlpha = 255
 local lastSync = 0
-local lastSentX, lastSentY, lastSentZ, lastSentH
-local sweepHandle = nil
-local sweepFromX, sweepFromY, sweepFromZ = nil, nil, nil
-local sweepNextAt = 0
-local blockNx, blockNy, blockNz = nil, nil, nil
-local blockUntil = 0
 local remoteEdits = {}
 
 local controls = {
@@ -91,15 +85,7 @@ local function drawHelpText()
     EndTextCommandDisplayText(Config.HelpPosition.x, Config.HelpPosition.y)
 end
 
--- 60 fps keeps today's step size. A hitch cannot take a step larger than 50 ms.
-local function frameScale()
-    local frame = GetFrameTime()
-    if type(frame) ~= 'number' or frame ~= frame or frame <= 0.0 then return 1.0 end
-    if frame > 0.05 then frame = 0.05 end
-    return frame * 60.0
-end
-
-local function getStep(scale)
+local function getStep()
     local step = Config.MoveStep
 
     if IsDisabledControlPressed(0, controls.shift) then
@@ -108,7 +94,7 @@ local function getStep(scale)
         step = step * Config.SlowMultiplier
     end
 
-    return step * scale
+    return step
 end
 
 local function withinLimit(origin, dest)
@@ -120,13 +106,6 @@ local function withinLimit(origin, dest)
     return true
 end
 
-local function hasMoved(x1, y1, z1, x2, y2, z2)
-    local dx = x2 - x1
-    local dy = y2 - y1
-    local dz = z2 - z1
-    return (dx * dx + dy * dy + dz * dz) > 1.0e-8
-end
-
 -- Keyboard diagonals on the digital keys drop an axis. The analog axes keep both.
 local function stickAxis(value)
     if value > 0.4 then return 1.0 end
@@ -135,77 +114,15 @@ local function stickAxis(value)
     return value
 end
 
-local function clearSweep()
-    sweepHandle = nil
-    sweepFromX, sweepFromY, sweepFromZ = nil, nil, nil
-    blockNx, blockNy, blockNz = nil, nil, nil
-end
-
-local function deflect(x, y, z, fromX, fromY, fromZ)
-    if not blockNx or GetGameTimer() > blockUntil then
-        return x, y, z
-    end
-    local dx = x - fromX
-    local dy = y - fromY
-    local dz = z - fromZ
-    local dot = dx * blockNx + dy * blockNy + dz * blockNz
-    if dot < -0.0001 then
-        return fromX + (dx - blockNx * dot), fromY + (dy - blockNy * dot), fromZ + (dz - blockNz * dot)
-    end
-    return x, y, z
-end
-
--- One async probe in flight. A hit removes only the axis that entered the surface.
-local function pollSweep(ped)
-    if not sweepHandle then return end
-    local status, hit, _, normal = GetShapeTestResult(sweepHandle)
-    if status == 1 then return end
-    local fromX, fromY, fromZ = sweepFromX, sweepFromY, sweepFromZ
-    sweepHandle = nil
-    sweepFromX, sweepFromY, sweepFromZ = nil, nil, nil
-    if hit ~= 1 or not normal or not fromX then
-        blockNx, blockNy, blockNz = nil, nil, nil
-        return
-    end
-
-    local nx, ny, nz = normal.x + 0.0, normal.y + 0.0, normal.z + 0.0
-    local nlen = nx * nx + ny * ny + nz * nz
-    if nlen < 0.25 then
-        SetEntityCoordsNoOffset(ped, fromX, fromY, fromZ, false, false, false)
-        blockNx, blockNy, blockNz = nil, nil, nil
-        return
-    end
-
-    blockNx, blockNy, blockNz = nx, ny, nz
-    blockUntil = GetGameTimer() + 180
-    local coords = GetEntityCoords(ped)
-    local sx, sy, sz = deflect(coords.x, coords.y, coords.z, fromX, fromY, fromZ)
-    if hasMoved(coords.x, coords.y, coords.z, sx, sy, sz) then
-        if withinLimit(originalCoords, vector3(sx, sy, sz)) then
-            SetEntityCoordsNoOffset(ped, sx, sy, sz, false, false, false)
-        else
-            SetEntityCoordsNoOffset(ped, fromX, fromY, fromZ, false, false, false)
-        end
-    end
-end
-
-local function queueSweep(ped, x1, y1, z1, x2, y2, z2)
-    if not Config.CollisionCheck or sweepHandle then return end
-    local now = GetGameTimer()
-    if now < sweepNextAt then return end
-    sweepFromX, sweepFromY, sweepFromZ = x1, y1, z1
-    sweepHandle = StartShapeTestLosProbe(x1, y1, z1 + 0.4, x2, y2, z2 + 0.4, 17, ped, 7)
-    sweepNextAt = now + 50
-end
-
-local function poseChanged(x, y, z, h)
-    if lastSentX == nil then return true end
-    if math.abs(x - lastSentX) > 0.0005 or math.abs(y - lastSentY) > 0.0005 or math.abs(z - lastSentZ) > 0.0005 then
-        return true
-    end
-    local dh = math.abs(h - lastSentH) % 360.0
-    if dh > 180.0 then dh = 360.0 - dh end
-    return dh > 0.05
+local function pathBlocked(from, to, ped)
+    if not Config.CollisionCheck then return false end
+    local handle = StartExpensiveSynchronousShapeTestLosProbe(
+        from.x, from.y, from.z + 0.4,
+        to.x, to.y, to.z + 0.4,
+        17, ped, 7
+    )
+    local _, hit = GetShapeTestResult(handle)
+    return hit == 1
 end
 
 local function getForwardRight(heading)
@@ -271,8 +188,6 @@ local function stopEditing(save)
     originalCoords = nil
     originalHeading = nil
     originalAlpha = nil
-    lastSentX = nil
-    clearSweep()
 
     replayCapturedEmote()
     capturedEmote = nil
@@ -294,8 +209,6 @@ local function startEditing()
     end
 
     editing = true
-    lastSentX = nil
-    clearSweep()
     originalCoords = GetEntityCoords(ped)
     originalHeading = GetEntityHeading(ped)
     originalAlpha = GetEntityAlpha(ped)
@@ -346,17 +259,11 @@ CreateThread(function()
                 DisableControlAction(0, control, true)
             end
 
-            if Config.CollisionCheck then
-                pollSweep(ped)
-            end
-
             local coords = GetEntityCoords(ped)
-            local fromX, fromY, fromZ = coords.x, coords.y, coords.z
             local heading = GetEntityHeading(ped)
-            local scale = frameScale()
-            local step = getStep(scale)
-            local heightStep = Config.HeightStep * scale
-            local rotateStep = Config.RotateStep * scale
+            local step = getStep()
+            local heightStep = Config.HeightStep
+            local rotateStep = Config.RotateStep
             local forward, right = getForwardRight(heading)
             local rightAmount = stickAxis(GetDisabledControlNormal(0, 30))
             local forwardAmount = stickAxis(-GetDisabledControlNormal(0, 31))
@@ -366,58 +273,49 @@ CreateThread(function()
                 if IsDisabledControlPressed(0, controls.d) then rightAmount = 1.0 end
                 if IsDisabledControlPressed(0, controls.a) then rightAmount = rightAmount - 1.0 end
             end
-            local upAmount = 0.0
-            if IsDisabledControlPressed(0, controls.pageUp) then upAmount = 1.0 end
-            if IsDisabledControlPressed(0, controls.pageDown) then upAmount = upAmount - 1.0 end
-            local headingMoved = false
+            local moved = false
+
+            if forwardAmount ~= 0.0 then
+                coords = coords + (forward * (step * forwardAmount))
+                moved = true
+            end
+
+            if rightAmount ~= 0.0 then
+                coords = coords + (right * (step * rightAmount))
+                moved = true
+            end
+
+            if IsDisabledControlPressed(0, controls.pageUp) then
+                coords = coords + vector3(0.0, 0.0, heightStep)
+                moved = true
+            end
+
+            if IsDisabledControlPressed(0, controls.pageDown) then
+                coords = coords - vector3(0.0, 0.0, heightStep)
+                moved = true
+            end
 
             if IsDisabledControlPressed(0, controls.q) then
                 heading = heading + rotateStep
-                headingMoved = true
+                moved = true
             end
 
             if IsDisabledControlPressed(0, controls.e) then
                 heading = heading - rotateStep
-                headingMoved = true
+                moved = true
             end
 
-            local targetX, targetY, targetZ = fromX, fromY, fromZ
-            if forwardAmount ~= 0.0 or rightAmount ~= 0.0 then
-                local hx = fromX + forward.x * step * forwardAmount + right.x * step * rightAmount
-                local hy = fromY + forward.y * step * forwardAmount + right.y * step * rightAmount
-                if withinLimit(originalCoords, vector3(hx, hy, fromZ)) then
-                    targetX, targetY = hx, hy
+            if moved then
+                local positionOk = withinLimit(originalCoords, coords) and not pathBlocked(GetEntityCoords(ped), coords, ped)
+                if positionOk then
+                    SetEntityCoordsNoOffset(ped, coords.x, coords.y, coords.z, false, false, false)
                 end
-            end
-            if upAmount ~= 0.0 then
-                local hz = targetZ + heightStep * upAmount
-                if withinLimit(originalCoords, vector3(targetX, targetY, hz)) then
-                    targetZ = hz
-                end
-            end
-            if Config.CollisionCheck then
-                targetX, targetY, targetZ = deflect(targetX, targetY, targetZ, fromX, fromY, fromZ)
-                if not withinLimit(originalCoords, vector3(targetX, targetY, targetZ)) then
-                    targetX, targetY, targetZ = fromX, fromY, fromZ
-                end
-            end
-
-            local positionChanged = hasMoved(fromX, fromY, fromZ, targetX, targetY, targetZ)
-            if positionChanged then
-                SetEntityCoordsNoOffset(ped, targetX, targetY, targetZ, false, false, false)
-                queueSweep(ped, fromX, fromY, fromZ, targetX, targetY, targetZ)
-                coords = vector3(targetX, targetY, targetZ)
-            end
-            if headingMoved then
                 SetEntityHeading(ped, heading % 360.0)
-            end
+                coords = GetEntityCoords(ped)
 
-            if positionChanged or headingMoved then
-                local sentHeading = heading % 360.0
-                if Config.NetworkSync and poseChanged(coords.x, coords.y, coords.z, sentHeading) and (GetGameTimer() - lastSync) >= Config.SyncInterval then
+                if Config.NetworkSync and (GetGameTimer() - lastSync) >= Config.SyncInterval then
                     lastSync = GetGameTimer()
-                    lastSentX, lastSentY, lastSentZ, lastSentH = coords.x, coords.y, coords.z, sentHeading
-                    TriggerServerEvent('nova-animpos:server:sync', coords.x, coords.y, coords.z, sentHeading)
+                    TriggerServerEvent('nova-animpos:server:sync', coords.x, coords.y, coords.z, heading % 360.0)
                 end
             end
 
